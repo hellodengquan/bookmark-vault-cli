@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import enum
 import re
+import sys
 from typing import Optional
 
 import click
@@ -14,6 +16,21 @@ from app.database import SessionLocal, engine, Base
 from app import crud, schemas
 
 console = Console()
+err_console = Console(stderr=True)
+
+
+class ExitCode(enum.IntEnum):
+    OK = 0
+    USAGE = 2
+    NOT_FOUND = 4
+    CONFLICT = 6
+    DATA_ERR = 8
+    UNAVAILABLE = 11
+
+
+def _exit(code: ExitCode, msg: str, style: str = "red") -> None:
+    err_console.print(f"[{style}]✗ {msg}[/{style}]")
+    raise SystemExit(code)
 
 
 def _init_db():
@@ -43,29 +60,122 @@ ID: {bookmark.id}[/dim]
     console.print(Panel(content.strip(), title="📑 书签详情", border_style="green"))
 
 
-def _print_bookmark_table(bookmarks, title: str = "📚 书签列表") -> None:
+def _print_bookmark_table(bookmarks, title: str = "📚 书签列表", total: int = 0,
+                          skip: int = 0, limit: int = 0) -> None:
     table = Table(
         title=title,
-        box=box.ROUNDED,
-        header_style="bold magenta",
-        show_lines=False,
+        box=box.HEAVY_HEAD,
+        header_style="bold bright_white on blue",
+        show_lines=True,
+        padding=(0, 1),
     )
-    table.add_column("ID", style="dim", width=6, justify="right")
-    table.add_column("标题", style="bold", overflow="fold")
-    table.add_column("URL", style="blue", overflow="fold")
-    table.add_column("标签", style="cyan", overflow="fold")
+    table.add_column("ID", style="bold yellow", width=5, justify="right")
+    table.add_column("标题", style="bold", max_width=36, overflow="fold")
+    table.add_column("URL", style="bright_blue", max_width=40, overflow="fold")
+    table.add_column("描述", style="dim", max_width=30, overflow="fold")
+    table.add_column("标签", style="cyan", max_width=20, overflow="fold")
+    table.add_column("创建时间", style="dim", width=19)
     table.add_column("更新时间", style="dim", width=19)
 
     for bm in bookmarks:
-        tags = ", ".join(t.name for t in bm.tags) if bm.tags else "-"
+        tags = ", ".join(t.name for t in bm.tags) if bm.tags else "[dim]-[/dim]"
+        desc = (bm.description[:28] + "...") if bm.description and len(bm.description) > 30 else (bm.description or "[dim]-[/dim]")
         table.add_row(
             str(bm.id),
             bm.title,
             bm.url,
+            desc,
             tags,
+            bm.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             bm.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
         )
 
+    console.print(table)
+    if total > 0:
+        console.print(
+            f"[dim]共 {total} 条记录，显示第 {skip + 1}-{min(skip + limit, total)} 条[/dim]"
+        )
+
+
+def _print_search_table(items, query: str, total: int = 0,
+                        skip: int = 0, limit: int = 0) -> None:
+    table = Table(
+        title=f"🔍 搜索结果: {query}",
+        box=box.HEAVY_HEAD,
+        header_style="bold bright_white on blue",
+        show_lines=True,
+        padding=(0, 1),
+    )
+    table.add_column("ID", style="bold yellow", width=5, justify="right")
+    table.add_column("标题", style="bold", max_width=28, overflow="fold")
+    table.add_column("摘要", style="dim italic", max_width=36, overflow="fold")
+    table.add_column("标签", style="cyan", max_width=20, overflow="fold")
+    table.add_column("更新时间", style="dim", width=19)
+
+    for item in items:
+        snippet = item.get("snippet") or item.get("description") or ""
+        snippet_plain = _strip_markup(snippet)
+        if len(snippet_plain) > 60:
+            snippet_plain = snippet_plain[:57] + "..."
+        tags = ", ".join(t.name for t in item["tags"]) if item["tags"] else "[dim]-[/dim]"
+
+        table.add_row(
+            str(item["id"]),
+            item["title"],
+            snippet_plain or "[dim]-[/dim]",
+            tags,
+            item["updated_at"].strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+    console.print(table)
+    if total > 0:
+        console.print(
+            f"[dim]共找到 {total} 条结果，显示第 {skip + 1}-{min(skip + limit, total)} 条[/dim]"
+        )
+
+
+def _print_tag_table(tags) -> None:
+    table = Table(
+        title="🏷️  标签列表",
+        box=box.HEAVY_HEAD,
+        header_style="bold bright_white on blue",
+        show_lines=True,
+        padding=(0, 1),
+    )
+    table.add_column("ID", style="bold yellow", width=5, justify="right")
+    table.add_column("标签名", style="bold cyan", max_width=20, overflow="fold")
+    table.add_column("颜色", max_width=12)
+    table.add_column("书签数", style="green", width=8, justify="right")
+    table.add_column("创建时间", style="dim", width=19)
+
+    for t in tags:
+        color_val = t.get("color")
+        if color_val:
+            color_cell = f"[{color_val} on {color_val}]████[/] {color_val}"
+        else:
+            color_cell = "[dim]-[/dim]"
+        table.add_row(
+            str(t["id"]),
+            t["name"],
+            color_cell,
+            str(t["bookmark_count"]),
+            t["created_at"].strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+    console.print(table)
+
+
+def _print_empty_table(entity: str, hint: str = "") -> None:
+    table = Table(
+        box=box.HEAVY_HEAD,
+        header_style="bold bright_white on blue",
+        show_lines=False,
+    )
+    table.add_column(entity, style="yellow", justify="center")
+    msg = f"暂无{entity}"
+    if hint:
+        msg += f"  →  {hint}"
+    table.add_row(msg)
     console.print(table)
 
 
@@ -98,17 +208,18 @@ def add_bookmark(url: str, title: str, desc: Optional[str], tags: tuple):
     db = SessionLocal()
     try:
         bookmark_in = schemas.BookmarkCreate(
-            url=url,
-            title=title,
-            description=desc,
-            tags=list(tags),
+            url=url, title=title, description=desc, tags=list(tags) if tags else [],
         )
         bookmark = crud.create_bookmark(db, bookmark_in)
         console.print(f"[green]✓ 书签添加成功！[/green] ID: [bold]{bookmark.id}[/bold]")
         _print_bookmark_detail(bookmark)
+    except ValueError as e:
+        _exit(ExitCode.USAGE, f"参数错误: {e}")
     except Exception as e:
-        console.print(f"[red]✗ 添加失败:[/red] {e}")
-        raise SystemExit(1)
+        err_msg = str(e)
+        if "UNIQUE constraint" in err_msg or "already exists" in err_msg:
+            _exit(ExitCode.CONFLICT, f"书签已存在: {e}")
+        _exit(ExitCode.UNAVAILABLE, f"添加失败: {e}")
     finally:
         db.close()
 
@@ -132,16 +243,14 @@ def list_bookmarks(tag: Optional[str], sort: str, order: str, skip: int, limit: 
         )
         if total == 0:
             if tag:
-                console.print(f"[yellow]ℹ 标签 '{tag}' 下没有书签[/yellow]")
+                _print_empty_table("书签", f"标签 '{tag}' 下没有书签")
             else:
-                console.print("[yellow]ℹ 暂无书签，使用 'bookmark add' 添加第一个书签吧[/yellow]")
+                _print_empty_table("书签", "使用 bookmark add 添加第一个书签")
             return
 
-        _print_bookmark_table(items)
-        console.print(f"[dim]共 {total} 条记录，显示第 {skip + 1}-{min(skip + limit, total)} 条[/dim]")
+        _print_bookmark_table(items, total=total, skip=skip, limit=limit)
     except Exception as e:
-        console.print(f"[red]✗ 查询失败:[/red] {e}")
-        raise SystemExit(1)
+        _exit(ExitCode.UNAVAILABLE, f"查询失败: {e}")
     finally:
         db.close()
 
@@ -154,12 +263,12 @@ def get_bookmark(bookmark_id: int):
     try:
         bookmark = crud.get_bookmark(db, bookmark_id)
         if bookmark is None:
-            console.print(f"[red]✗ 书签 ID={bookmark_id} 不存在[/red]")
-            raise SystemExit(1)
+            _exit(ExitCode.NOT_FOUND, f"书签 ID={bookmark_id} 不存在")
         _print_bookmark_detail(bookmark)
+    except SystemExit:
+        raise
     except Exception as e:
-        console.print(f"[red]✗ 查询失败:[/red] {e}")
-        raise SystemExit(1)
+        _exit(ExitCode.UNAVAILABLE, f"查询失败: {e}")
     finally:
         db.close()
 
@@ -178,8 +287,7 @@ def update_bookmark(bookmark_id: int, title: Optional[str], url: Optional[str],
     try:
         bookmark = crud.get_bookmark(db, bookmark_id)
         if bookmark is None:
-            console.print(f"[red]✗ 书签 ID={bookmark_id} 不存在[/red]")
-            raise SystemExit(1)
+            _exit(ExitCode.NOT_FOUND, f"书签 ID={bookmark_id} 不存在")
 
         update_data = {}
         if title is not None:
@@ -188,22 +296,24 @@ def update_bookmark(bookmark_id: int, title: Optional[str], url: Optional[str],
             update_data["url"] = url
         if desc is not None:
             update_data["description"] = desc
-        if tags is not None:
+        if tags:
             update_data["tags"] = list(tags)
 
         if not update_data:
-            console.print("[yellow]ℹ 未提供任何更新字段[/yellow]")
-            raise SystemExit(1)
+            _exit(ExitCode.USAGE, "未提供任何更新字段，请至少指定一个选项")
 
-        bookmark_in = schemas.BookmarkUpdate(**update_data)
+        try:
+            bookmark_in = schemas.BookmarkUpdate(**update_data)
+        except ValueError as e:
+            _exit(ExitCode.USAGE, f"参数错误: {e}")
+
         updated = crud.update_bookmark(db, bookmark, bookmark_in)
-        console.print(f"[green]✓ 书签更新成功！[/green]")
+        console.print("[green]✓ 书签更新成功！[/green]")
         _print_bookmark_detail(updated)
     except SystemExit:
         raise
     except Exception as e:
-        console.print(f"[red]✗ 更新失败:[/red] {e}")
-        raise SystemExit(1)
+        _exit(ExitCode.UNAVAILABLE, f"更新失败: {e}")
     finally:
         db.close()
 
@@ -217,26 +327,23 @@ def delete_bookmark(bookmark_id: int, yes: bool):
     try:
         bookmark = crud.get_bookmark(db, bookmark_id)
         if bookmark is None:
-            console.print(f"[red]✗ 书签 ID={bookmark_id} 不存在[/red]")
-            raise SystemExit(1)
+            _exit(ExitCode.NOT_FOUND, f"书签 ID={bookmark_id} 不存在")
 
         if not yes:
             console.print(f"[yellow]即将删除书签:[/yellow] {bookmark.title}")
             if not click.confirm("确定要删除吗？"):
                 console.print("[dim]已取消删除[/dim]")
-                raise SystemExit(0)
+                raise SystemExit(ExitCode.OK)
 
         success = crud.delete_bookmark(db, bookmark_id)
         if success:
             console.print(f"[green]✓ 书签 ID={bookmark_id} 已删除[/green]")
         else:
-            console.print("[red]✗ 删除失败[/red]")
-            raise SystemExit(1)
+            _exit(ExitCode.UNAVAILABLE, "删除失败")
     except SystemExit:
         raise
     except Exception as e:
-        console.print(f"[red]✗ 删除失败:[/red] {e}")
-        raise SystemExit(1)
+        _exit(ExitCode.UNAVAILABLE, f"删除失败: {e}")
     finally:
         db.close()
 
@@ -254,45 +361,13 @@ def search_bookmarks(query: str, tag: Optional[str], skip: int, limit: int):
             db, query=query, skip=skip, limit=limit, tag=tag
         )
         if total == 0:
-            console.print(f"[yellow]ℹ 未找到与 '{query}' 相关的书签[/yellow]")
+            hint = f"标签 '{tag}' 下" if tag else ""
+            _print_empty_table("搜索结果", f"{hint}未找到与 '{query}' 相关的书签")
             return
 
-        table = Table(
-            title=f"🔍 搜索结果: {query}",
-            box=box.ROUNDED,
-            header_style="bold magenta",
-            show_lines=False,
-        )
-        table.add_column("ID", style="dim", width=6, justify="right")
-        table.add_column("标题 / 摘要", style="bold", overflow="fold")
-        table.add_column("标签", style="cyan", overflow="fold")
-        table.add_column("更新时间", style="dim", width=19)
-
-        for item in items:
-            snippet = item.get("snippet") or item.get("description") or ""
-            snippet_plain = _strip_markup(snippet)
-            tags = ", ".join(t.name for t in item["tags"]) if item["tags"] else "-"
-
-            title_text = Text(item["title"])
-            if snippet_plain:
-                snippet_text = Text("\n")
-                snippet_text.append(snippet_plain, style="dim")
-                combined = Text.assemble(title_text, snippet_text)
-            else:
-                combined = title_text
-
-            table.add_row(
-                str(item["id"]),
-                combined,
-                tags,
-                item["updated_at"].strftime("%Y-%m-%d %H:%M:%S"),
-            )
-
-        console.print(table)
-        console.print(f"[dim]共找到 {total} 条结果，显示第 {skip + 1}-{min(skip + limit, total)} 条[/dim]")
+        _print_search_table(items, query, total=total, skip=skip, limit=limit)
     except Exception as e:
-        console.print(f"[red]✗ 搜索失败:[/red] {e}")
-        raise SystemExit(1)
+        _exit(ExitCode.UNAVAILABLE, f"搜索失败: {e}")
     finally:
         db.close()
 
@@ -306,34 +381,12 @@ def list_tags(skip: int, limit: int):
     try:
         tags = crud.get_tags_with_count(db, skip=skip, limit=limit)
         if not tags:
-            console.print("[yellow]ℹ 暂无标签[/yellow]")
+            _print_empty_table("标签", "使用 tag add 创建第一个标签")
             return
 
-        table = Table(
-            title="🏷️  标签列表",
-            box=box.ROUNDED,
-            header_style="bold magenta",
-            show_lines=False,
-        )
-        table.add_column("ID", style="dim", width=6, justify="right")
-        table.add_column("标签名", style="bold cyan")
-        table.add_column("颜色", style="yellow")
-        table.add_column("书签数", style="green", justify="right")
-        table.add_column("创建时间", style="dim", width=19)
-
-        for t in tags:
-            table.add_row(
-                str(t["id"]),
-                t["name"],
-                t.get("color") or "-",
-                str(t["bookmark_count"]),
-                t["created_at"].strftime("%Y-%m-%d %H:%M:%S"),
-            )
-
-        console.print(table)
+        _print_tag_table(tags)
     except Exception as e:
-        console.print(f"[red]✗ 查询失败:[/red] {e}")
-        raise SystemExit(1)
+        _exit(ExitCode.UNAVAILABLE, f"查询失败: {e}")
     finally:
         db.close()
 
@@ -347,17 +400,19 @@ def add_tag(name: str, color: Optional[str]):
     try:
         existing = crud.get_tag_by_name(db, name)
         if existing is not None:
-            console.print(f"[yellow]ℹ 标签 '{name}' 已存在[/yellow]")
-            raise SystemExit(1)
+            _exit(ExitCode.CONFLICT, f"标签 '{name}' 已存在（ID={existing.id}）")
 
-        tag_in = schemas.TagCreate(name=name, color=color)
+        try:
+            tag_in = schemas.TagCreate(name=name, color=color)
+        except ValueError as e:
+            _exit(ExitCode.USAGE, f"参数错误: {e}")
+
         tag = crud.create_tag(db, tag_in)
         console.print(f"[green]✓ 标签 '{tag.name}' 创建成功！[/green] ID: [bold]{tag.id}[/bold]")
     except SystemExit:
         raise
     except Exception as e:
-        console.print(f"[red]✗ 创建失败:[/red] {e}")
-        raise SystemExit(1)
+        _exit(ExitCode.UNAVAILABLE, f"创建失败: {e}")
     finally:
         db.close()
 
@@ -372,27 +427,27 @@ def update_tag(tag_id: int, name: Optional[str], color: Optional[str]):
     try:
         tag = crud.get_tag(db, tag_id)
         if tag is None:
-            console.print(f"[red]✗ 标签 ID={tag_id} 不存在[/red]")
-            raise SystemExit(1)
+            _exit(ExitCode.NOT_FOUND, f"标签 ID={tag_id} 不存在")
 
         if name is None and color is None:
-            console.print("[yellow]ℹ 未提供任何更新字段[/yellow]")
-            raise SystemExit(1)
+            _exit(ExitCode.USAGE, "未提供任何更新字段，请至少指定 --name 或 --color")
 
         if name and name != tag.name:
             existing = crud.get_tag_by_name(db, name)
             if existing is not None:
-                console.print(f"[red]✗ 标签名称 '{name}' 已存在[/red]")
-                raise SystemExit(1)
+                _exit(ExitCode.CONFLICT, f"标签名称 '{name}' 已存在（ID={existing.id}）")
 
-        tag_in = schemas.TagUpdate(name=name, color=color)
+        try:
+            tag_in = schemas.TagUpdate(name=name, color=color)
+        except ValueError as e:
+            _exit(ExitCode.USAGE, f"参数错误: {e}")
+
         updated = crud.update_tag(db, tag, tag_in)
         console.print(f"[green]✓ 标签更新成功！[/green] {updated.name}")
     except SystemExit:
         raise
     except Exception as e:
-        console.print(f"[red]✗ 更新失败:[/red] {e}")
-        raise SystemExit(1)
+        _exit(ExitCode.UNAVAILABLE, f"更新失败: {e}")
     finally:
         db.close()
 
@@ -406,26 +461,23 @@ def delete_tag(tag_id: int, yes: bool):
     try:
         tag = crud.get_tag(db, tag_id)
         if tag is None:
-            console.print(f"[red]✗ 标签 ID={tag_id} 不存在[/red]")
-            raise SystemExit(1)
+            _exit(ExitCode.NOT_FOUND, f"标签 ID={tag_id} 不存在")
 
         if not yes:
             console.print(f"[yellow]即将删除标签:[/yellow] {tag.name}")
             if not click.confirm("确定要删除吗？（书签不会被删除）"):
                 console.print("[dim]已取消删除[/dim]")
-                raise SystemExit(0)
+                raise SystemExit(ExitCode.OK)
 
         success = crud.delete_tag(db, tag_id)
         if success:
             console.print(f"[green]✓ 标签 '{tag.name}' 已删除[/green]")
         else:
-            console.print("[red]✗ 删除失败[/red]")
-            raise SystemExit(1)
+            _exit(ExitCode.UNAVAILABLE, "删除失败")
     except SystemExit:
         raise
     except Exception as e:
-        console.print(f"[red]✗ 删除失败:[/red] {e}")
-        raise SystemExit(1)
+        _exit(ExitCode.UNAVAILABLE, f"删除失败: {e}")
     finally:
         db.close()
 
